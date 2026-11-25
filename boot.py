@@ -9,8 +9,10 @@ MODE=ws       VLESS + WebSocket (明文)        <- 仅排障
 环境变量:
   PORT                容器监听端口(平台注入)
   UUID                VLESS 用户 UUID
+  UUIDS               多个 UUID, 逗号分隔(叠加在 UUID 之上), 用于给其他设备/朋友开独立账号
   MODE                wstls | reality | ws
   WSPATH              WebSocket 路径
+  EARLY_DATA          WS 0-RTT 早期数据字节数, 默认 2048, 0=关闭
   CONF_DIR            证书/配置落盘目录, 默认 /tmp
   XRAY_VERSION        锁定 xray 版本, 如 v25.3.6; 默认 latest
   REALITY_PRIVATE_KEY Reality 私钥(仅 reality 模式)
@@ -40,6 +42,10 @@ PRIV = os.environ.get("REALITY_PRIVATE_KEY") or "w6BZ477jprB8ZCuEJkTxlG8Gyuz_49c
 SNI = os.environ.get("REALITY_SNI") or "www.microsoft.com"
 DEST = os.environ.get("REALITY_DEST") or (SNI + ":443")
 SID = os.environ.get("REALITY_SHORT_ID") or "3f9c7a1e5d842b60"
+UUIDS = [u.strip() for u in (os.environ.get("UUIDS") or "").split(",") if u.strip()]
+if UUID not in UUIDS:
+    UUIDS.insert(0, UUID)
+EARLY = (os.environ.get("EARLY_DATA") or "2048").strip()
 
 if not WSPATH.startswith("/"):
     WSPATH = "/" + WSPATH
@@ -135,24 +141,30 @@ def write_cert():
 
 
 def wstls_inbound():
+    ws = {"path": WSPATH}
+    if EARLY and EARLY != "0":
+        ws["maxEarlyData"] = int(EARLY)
+        ws["earlyDataHeaderName"] = "Sec-WebSocket-Protocol"
+    tls = {
+        "alpn": ["http/1.1"],
+        "certificates": [
+            {"certificateFile": CERT_PATH, "keyFile": KEY_PATH}
+        ],
+    }
     return {
         "listen": "0.0.0.0",
         "port": int(PORT),
         "protocol": "vless",
         "settings": {
-            "clients": [{"id": UUID}],
+            "clients": [{"id": u} for u in UUIDS],
             "decryption": "none",
         },
         "streamSettings": {
             "network": "ws",
             "security": "tls",
-            "tlsSettings": {
-                "alpn": ["http/1.1"],
-                "certificates": [
-                    {"certificateFile": CERT_PATH, "keyFile": KEY_PATH}
-                ],
-            },
-            "wsSettings": {"path": WSPATH},
+            "tlsSettings": tls,
+            "wsSettings": ws,
+            "sockopt": {"tcpFastOpen": True},
         },
     }
 
@@ -228,8 +240,8 @@ def main():
         write_cert()
     with open(CFG_PATH, "w", encoding="utf-8") as f:
         json.dump(build_config(), f, indent=2)
-    log("mode=%s listen 0.0.0.0:%s ws-path=%s uuid=%s ver=%s"
-        % (MODE, PORT, WSPATH, UUID, VER))
+    log("mode=%s listen 0.0.0.0:%s ws-path=%s users=%d early=%s ver=%s"
+        % (MODE, PORT, WSPATH, len(UUIDS), EARLY or "0", VER))
     os.execv(BIN, [BIN, "run", "-c", CFG_PATH])
 
 
